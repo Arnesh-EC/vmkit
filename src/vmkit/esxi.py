@@ -1,19 +1,22 @@
 import atexit
 import logging
 import ssl
-import sys
 import time
 
 from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 
+from vmkit.errors import AuthenticationError, ConnectionFailedError
 from vmkit.progress import make_progress_bar
 
 log = logging.getLogger("deploy-vm")
 
 
 def connect(host: str, user: str, password: str, port: int) -> vim.ServiceInstance:
-    """Connect to ESXi/vCenter, return the ServiceInstance."""
+    """Connect to ESXi/vCenter, return the ServiceInstance.
+
+    Raises AuthenticationError on bad credentials, ConnectionFailedError otherwise.
+    """
     log.info("Connecting to %s as %s ...", host, user)
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -21,11 +24,11 @@ def connect(host: str, user: str, password: str, port: int) -> vim.ServiceInstan
     try:
         si = SmartConnect(host=host, user=user, pwd=password, port=port, sslContext=ctx)
     except vim.fault.InvalidLogin:
-        log.error("Login failed: invalid username or password.")
-        sys.exit(2)
+        raise AuthenticationError(
+            f"Login failed: invalid username or password for {user}@{host}."
+        )
     except Exception as exc:
-        log.error("Could not connect to %s: %s", host, exc)
-        sys.exit(2)
+        raise ConnectionFailedError(f"Could not connect to {host}: {exc}")
     atexit.register(Disconnect, si)
     log.info("Connected. API version: %s", si.content.about.fullName)
     return si
