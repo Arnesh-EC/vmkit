@@ -1,8 +1,10 @@
 """High-level VM deployment workflows — the reusable core behind the CLIs / API.
 
 Functions take parameters (including credentials, via a ``Connection``) and raise
-typed ``vmkit.errors`` exceptions. They do not prompt, print, or call sys.exit;
-progress/logging goes through stdlib ``logging`` so any front-end can capture it.
+typed ``vmkit.errors`` exceptions. They do not prompt, print, or call sys.exit.
+Diagnostics go through stdlib ``logging``; long-running step progress is emitted
+as structured ``vmkit.progress.ProgressEvent``s through an optional ``progress``
+callback, so any front-end (CLI bar, websocket, polling) can render it.
 """
 
 import logging
@@ -37,7 +39,7 @@ from vmkit.esxi import (
     power_on_vm,
     register_vm,
 )
-from vmkit.progress import human_bytes
+from vmkit.progress import ProgressCallback, human_bytes
 from vmkit.vmx import DEFAULT_GUEST_OS, parse_guest_os, random_mac, render_vmx
 
 # Use the same logger name that setup_logging() configures, so workflow progress
@@ -210,11 +212,15 @@ def clone_workflow(
     max_usage_pct: float = 80.0,
     skip_disk_check: bool = False,
     power_on: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> CloneResult:
     """Clone the base VM's disk server-side, render+upload a VMX, register the VM.
 
     Raises VmExistsError, InsufficientSpaceError, or VmkitError (and lets ESXi
     errors propagate). The temp VMX is always cleaned up.
+
+    ``progress`` (optional) receives a ``ProgressEvent`` for each long-running
+    step (VMDK copy, uploads, register, power-on); pass ``None`` to stay silent.
     """
     content = conn.content
     dc = get_datacenter(content)
@@ -242,14 +248,15 @@ def clone_workflow(
     tmp_vmx = None
     try:
         make_directory(content, dc, datastore, name)
-        copy_virtual_disk(content, dc, datastore, base, name)
-        copy_datastore_file(content, dc, datastore, base, name, "nvram")
+        copy_virtual_disk(content, dc, datastore, base, name, progress)
+        copy_datastore_file(content, dc, datastore, base, name, "nvram", progress)
 
         if iso_path:
             upload_file(
                 conn.host, conn.user, conn.password, conn.port,
                 datastore, dc.name, name, iso_path,
                 remote_filename=f"{name}-config.iso",
+                progress=progress,
             )
 
         tmp_vmx = _write_temp_vmx(vmx_content)
@@ -257,9 +264,10 @@ def clone_workflow(
             conn.host, conn.user, conn.password, conn.port,
             datastore, dc.name, name, tmp_vmx,
             remote_filename=f"{name}.vmx",
+            progress=progress,
         )
 
-        register_vm(content, dc, datastore, name)
+        register_vm(content, dc, datastore, name, progress)
     finally:
         if tmp_vmx is not None:
             _unlink_quietly(tmp_vmx)
@@ -272,7 +280,7 @@ def clone_workflow(
     log.info("CONFIRMED: VM '%s' is now in inventory.", name)
 
     if power_on:
-        power_on_vm(content, name)
+        power_on_vm(content, name, progress)
 
     return CloneResult(
         name=name, mac=mac, guest_os=guest_os,
@@ -291,11 +299,15 @@ def update_workflow(
     iso_path: str | None = None,
     remove_iso: bool = False,
     power_on: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> UpdateResult:
     """Re-render and upload the VMX (CPU/RAM/MAC/ISO) for an existing VM.
 
     Unspecified hardware values are preserved from the current config. Raises
     VmNotFoundError if the VM is absent. The temp VMX is always cleaned up.
+
+    ``progress`` (optional) receives a ``ProgressEvent`` for each long-running
+    step (power-off, uploads, power-on); pass ``None`` to stay silent.
     """
     content = conn.content
     dc = get_datacenter(content)
@@ -326,7 +338,7 @@ def update_workflow(
 
     if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
         log.info("Powering off VM ...")
-        power_off_vm(content, name)
+        power_off_vm(content, name, progress)
         time.sleep(2)
     else:
         log.info("VM is already powered off.")
@@ -338,6 +350,7 @@ def update_workflow(
                 conn.host, conn.user, conn.password, conn.port,
                 datastore, dc.name, name, iso_path,
                 remote_filename=f"{name}-config.iso",
+                progress=progress,
             )
 
         tmp_vmx = _write_temp_vmx(vmx_content)
@@ -345,13 +358,14 @@ def update_workflow(
             conn.host, conn.user, conn.password, conn.port,
             datastore, dc.name, name, tmp_vmx,
             remote_filename=f"{name}.vmx",
+            progress=progress,
         )
     finally:
         if tmp_vmx is not None:
             _unlink_quietly(tmp_vmx)
 
     if power_on:
-        power_on_vm(content, name)
+        power_on_vm(content, name, progress)
 
     return UpdateResult(
         name=name, cpus=cpus, mem_mb=mem_mb, mac=mac,

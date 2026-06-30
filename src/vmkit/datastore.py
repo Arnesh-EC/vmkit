@@ -8,7 +8,7 @@ import requests
 
 from pyVmomi import vim
 
-from vmkit.progress import make_progress_bar
+from vmkit.progress import ProgressCallback, Reporter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -39,6 +39,7 @@ def copy_virtual_disk(
     datastore: str,
     base: str,
     name: str,
+    progress: ProgressCallback | None = None,
 ) -> None:
     """Server-side copy of the base VMDK to the new VM folder."""
     from vmkit.esxi import wait_for_task
@@ -57,7 +58,7 @@ def copy_virtual_disk(
         destDatacenter=dc,
         force=False,
     )
-    wait_for_task(task, "VMDK copy")
+    wait_for_task(task, "VMDK copy", progress)
 
 
 def copy_datastore_file(
@@ -67,6 +68,7 @@ def copy_datastore_file(
     base: str,
     name: str,
     ext: str,
+    progress: ProgressCallback | None = None,
 ) -> None:
     """Server-side copy of an arbitrary datastore file (e.g. .nvram)."""
     from vmkit.esxi import wait_for_task
@@ -85,7 +87,7 @@ def copy_datastore_file(
         destinationDatacenter=dc,
         force=False,
     )
-    wait_for_task(task, f"{ext} copy")
+    wait_for_task(task, f"{ext} copy", progress)
 
 
 def upload_file(
@@ -98,6 +100,7 @@ def upload_file(
     vm_name: str,
     local_path: str,
     remote_filename: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> None:
     """Upload a local file to <datastore>/<vm_name>/<remote_filename> via HTTPS PUT."""
     local = Path(local_path)
@@ -116,36 +119,33 @@ def upload_file(
     log.info("  local : %s (%d bytes)", local, total)
     log.info("  remote: [%s] %s", datastore, remote_path)
 
-    _remote_filename = remote_filename
+    reporter = Reporter(
+        progress,
+        key=f"upload:{remote_filename}",
+        label=f"upload {remote_filename}",
+        total=total,
+        unit="B",
+    )
 
     class _ProgressReader:
         def __init__(self, fileobj: IO[bytes], total_bytes: int) -> None:
             self.f = fileobj
             self.total = total_bytes
-            self.bar = make_progress_bar(
-                total=total_bytes,
-                desc=f"upload {_remote_filename}",
-                unit="B",
-                unit_scale=True,
-            )
 
         def read(self, size: int = -1) -> bytes:
             chunk = self.f.read(size)
-            self.bar.update(len(chunk))
+            reporter.advance(len(chunk))
             return chunk
-
-        def close(self) -> None:
-            self.bar.close()
 
         def __len__(self) -> int:
             return self.total
 
+    reporter.start()
     with open(local, "rb") as fh:
-        reader = _ProgressReader(fh, total)
         try:
             resp = requests.put(
                 url,
-                data=reader,
+                data=_ProgressReader(fh, total),
                 auth=(user, password),
                 headers={
                     "Content-Type": "application/octet-stream",
@@ -154,12 +154,15 @@ def upload_file(
                 verify=False,
                 timeout=120,
             )
-        finally:
-            reader.close()
+        except Exception as exc:
+            reporter.fail(str(exc))
+            raise
     if resp.status_code not in (200, 201):
+        reporter.fail(f"HTTP {resp.status_code}")
         raise RuntimeError(
             f"Upload failed (HTTP {resp.status_code}): {resp.text[:200]}"
         )
+    reporter.finish()
     log.info("  %s: done", remote_filename)
 
 

@@ -7,7 +7,7 @@ from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 
 from vmkit.errors import AuthenticationError, ConnectionFailedError
-from vmkit.progress import make_progress_bar
+from vmkit.progress import ProgressCallback, Reporter
 
 log = logging.getLogger("deploy-vm")
 
@@ -72,6 +72,7 @@ def register_vm(
     dc: vim.Datacenter,
     datastore: str,
     name: str,
+    progress: ProgressCallback | None = None,
 ) -> None:
     """Register the VM from its .vmx file."""
     vmx_ds_path = f"[{datastore}] {name}/{name}.vmx"
@@ -93,7 +94,7 @@ def register_vm(
         pool=resource_pool,
         host=esxi_host,
     )
-    wait_for_task(task, "Register VM")
+    wait_for_task(task, "Register VM", progress)
 
 
 def get_vm_by_name(
@@ -109,7 +110,11 @@ def get_vm_by_name(
         view.Destroy()
 
 
-def power_on_vm(content: vim.ServiceInstanceContent, name: str) -> None:
+def power_on_vm(
+    content: vim.ServiceInstanceContent,
+    name: str,
+    progress: ProgressCallback | None = None,
+) -> None:
     """Power on the named VM."""
     target = get_vm_by_name(content, name)
     if not target:
@@ -117,10 +122,14 @@ def power_on_vm(content: vim.ServiceInstanceContent, name: str) -> None:
         return
     log.info("Powering on VM: %s", name)
     task = target.PowerOnVM_Task()
-    wait_for_task(task, "Power on")
+    wait_for_task(task, "Power on", progress)
 
 
-def power_off_vm(content: vim.ServiceInstanceContent, name: str) -> None:
+def power_off_vm(
+    content: vim.ServiceInstanceContent,
+    name: str,
+    progress: ProgressCallback | None = None,
+) -> None:
     """Power off the named VM."""
     target = get_vm_by_name(content, name)
     if not target:
@@ -128,28 +137,31 @@ def power_off_vm(content: vim.ServiceInstanceContent, name: str) -> None:
         return
     log.info("Powering off VM: %s", name)
     task = target.PowerOffVM_Task()
-    wait_for_task(task, "Power off")
+    wait_for_task(task, "Power off", progress)
 
 
-def wait_for_task(task: vim.Task, label: str) -> object:
-    """Block until a vSphere task completes, showing a progress bar."""
-    bar = make_progress_bar(total=100, desc=label, unit="%")
-    last_pct = 0
+def _task_key(label: str) -> str:
+    """Stable per-operation key for progress consumers (one bar/channel each)."""
+    return "task:" + label.lower().replace(" ", "-")
+
+
+def wait_for_task(
+    task: vim.Task, label: str, progress: ProgressCallback | None = None
+) -> object:
+    """Block until a vSphere task completes, emitting 0-100% progress events."""
+    rep = Reporter(progress, key=_task_key(label), label=label, total=100, unit="%")
+    rep.start()
     while task.info.state in (vim.TaskInfo.State.running, vim.TaskInfo.State.queued):
-        pct = task.info.progress or 0
-        if pct > last_pct:
-            bar.update(pct - last_pct)
-            last_pct = pct
+        rep.to(task.info.progress or 0)
         time.sleep(1)
 
     if task.info.state == vim.TaskInfo.State.success:
-        bar.update(100 - last_pct)
-        bar.close()
+        rep.finish()
         log.info("  %s: done", label)
         return task.info.result
     else:
-        bar.close()
         err = task.info.error
         msg = err.msg if err else "unknown error"
+        rep.fail(msg)
         log.error("  %s FAILED: %s", label, msg)
         raise RuntimeError(f"{label} failed: {msg}")

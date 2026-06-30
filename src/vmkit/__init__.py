@@ -16,6 +16,11 @@ from vmkit.errors import (
     VmkitError,
     VmNotFoundError,
 )
+from vmkit.progress import (
+    Phase,
+    ProgressCallback,
+    ProgressEvent,
+)
 from vmkit.workflows import (
     CloneResult,
     Connection,
@@ -32,6 +37,9 @@ __all__ = [
     "update_workflow",
     "CloneResult",
     "UpdateResult",
+    "ProgressEvent",
+    "ProgressCallback",
+    "Phase",
     "VmkitError",
     "ValidationError",
     "AuthenticationError",
