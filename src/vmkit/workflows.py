@@ -106,6 +106,12 @@ class UpdateResult:
     powered_on: bool
 
 
+@dataclass
+class DestroyResult:
+    name: str
+    was_powered_on: bool
+
+
 # --------------------------------------------------------------------------- #
 # Helpers (also useful on their own)                                          #
 # --------------------------------------------------------------------------- #
@@ -371,3 +377,39 @@ def update_workflow(
         name=name, cpus=cpus, mem_mb=mem_mb, mac=mac,
         guest_os=guest_os, iso_action=iso_action, powered_on=power_on,
     )
+
+
+def destroy_workflow(
+    conn: Connection,
+    *,
+    name: str,
+    progress: ProgressCallback | None = None,
+) -> DestroyResult:
+    """Power off (if needed) and destroy an existing VM, deleting its files.
+
+    Raises VmNotFoundError if the VM is absent. Destruction is permanent —
+    ``Destroy_Task`` removes the VM from inventory and deletes its datastore
+    directory.
+
+    ``progress`` (optional) receives a ``ProgressEvent`` for each long-running
+    step (power-off, destroy); pass ``None`` to stay silent.
+    """
+    content = conn.content
+
+    vm = get_vm_by_name(content, name)
+    if vm is None:
+        raise VmNotFoundError(f"VM '{name}' not found.")
+
+    was_on = vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn
+    if was_on:
+        log.info("Powering off VM ...")
+        power_off_vm(content, name, progress)
+        time.sleep(2)
+    else:
+        log.info("VM is already powered off.")
+
+    log.info("Destroying VM: %s", name)
+    task = vm.Destroy_Task()
+    wait_for_task(task, "Destroy VM", progress)
+
+    return DestroyResult(name=name, was_powered_on=was_on)
