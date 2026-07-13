@@ -4,7 +4,7 @@ import ssl
 import time
 
 from pyVim.connect import SmartConnect, Disconnect
-from pyVmomi import vim
+from pyVmomi import vim, vmodl
 
 from vmkit.errors import AuthenticationError, ConnectionFailedError
 from vmkit.progress import ProgressCallback, Reporter
@@ -42,13 +42,23 @@ def get_datacenter(content: vim.ServiceInstanceContent) -> vim.Datacenter:
     raise RuntimeError("No datacenter found on host.")
 
 
+def _vm_name(vm: vim.VirtualMachine) -> str | None:
+    """Read a VM's name, returning None if the VM was deleted between the
+    container-view snapshot and this property read (e.g. a concurrent
+    Destroy_Task) — a mid-deletion VM should simply not be listed."""
+    try:
+        return vm.name
+    except vmodl.fault.ManagedObjectNotFound:
+        return None
+
+
 def list_vm_names(content: vim.ServiceInstanceContent) -> set[str]:
     """Return a set of all VM names currently in inventory."""
     view_mgr = content.viewManager
     assert view_mgr is not None
     view = view_mgr.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
     try:
-        return {vm.name for vm in view.view}
+        return {name for vm in view.view if (name := _vm_name(vm)) is not None}
     finally:
         view.Destroy()
 
@@ -105,7 +115,7 @@ def get_vm_by_name(
     assert view_mgr is not None
     view = view_mgr.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
     try:
-        return next((vm for vm in view.view if vm.name == name), None)
+        return next((vm for vm in view.view if _vm_name(vm) == name), None)
     finally:
         view.Destroy()
 
